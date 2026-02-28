@@ -1,181 +1,180 @@
-#  CryptoVentures DAO – Governance System
+# 🚀 CryptoVentures Governance Protocol
 
-A fully on-chain, modular DAO governance system implementing proposal creation with executable action payloads, non-linear weighted voting, delegation, quorum enforcement, timelock-based execution, and multi-tier treasury management.
+> A modular, on-chain DAO governance system with non-linear vote weighting, delegation, timelock-protected execution, and tiered treasury controls.
 
-Built with **Solidity + Hardhat + OpenZeppelin**.
-
----
-
-##  Overview
-
-CryptoVentures DAO enables members to:
-
-* Deposit stake and receive governance influence
-* Create proposals with spam prevention
-* Vote using snapshot-based, delegation-aware voting
-* Enforce quorum and approval thresholds
-* Queue approved proposals through a type-specific timelock delay
-* Execute proposals securely after delay using a dedicated executor role
-* Manage multiple treasuries with different risk profiles
-
-The system is **deterministic, auditable, and test-driven**.
+![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636?logo=solidity)
+![Hardhat](https://img.shields.io/badge/Hardhat-Toolbox-F7DF1E?logo=ethereum)
+![OpenZeppelin](https://img.shields.io/badge/OpenZeppelin-4.9-4E5EE4)
+![Tests](https://img.shields.io/badge/Tests-11%20Passing-success)
 
 ---
 
-##  Architecture
+## 🌐 Project Overview
 
-### Core Components
+CryptoVentures Governance Protocol enables members to create and govern treasury actions through a secure lifecycle:
 
-| Contract              | Responsibility                                              |
-| --------------------- | ----------------------------------------------------------- |
-| `GovernanceVotes`     | ERC20Votes governance token with delegation & snapshots     |
-| `GovernanceCore`      | Proposal lifecycle, voting, quorum, execution state machine |
-| `GovernanceTimelock`  | Enforces execution delay & emergency control                |
-| `OperationalTreasury` | Small, fast-approval operational expenses                   |
-| `InvestmentTreasury`  | High-value investment proposals                             |
-| `ReserveTreasury`     | Long-term DAO reserves                                      |
+- Stake-backed governance participation
+- Proposal creation with executable payloads (`target`, `value`, `calldata`)
+- Snapshot voting with delegation awareness
+- Non-linear vote weighting (`sqrt`) to reduce whale dominance
+- Timelock-enforced queue/execute controls
+- Segmented treasury execution by proposal type
 
----
-
-### Proposal Lifecycle
-
-```
-Pending → Active → Succeeded → Queued → Executed
-                  ↘ Defeated
-```
-
-* **Snapshot voting** prevents vote manipulation
-* **One-way transitions** prevent replay or double execution
-* **Timelock delay** allows emergency intervention
-
-### Proposal Types
-
-* **Operational**: baseline threshold, quorum, and delay
-* **Experimental**: lower threshold/quorum, higher approval requirement
-* **HighConviction**: higher threshold/quorum and longer timelock delay
-* Each type is bound to a specific treasury target and has independently configurable parameters
+The goal is to provide a production-style governance foundation that is transparent, auditable, and security-focused.
 
 ---
 
-##  Tech Stack
+## 🧱 Tech Stack
 
-* **Solidity** `^0.8.28`
-* **Hardhat**
-* **OpenZeppelin v4.9**
-* **TypeScript**
-* **ethers v6**
-* **ERC20Votes (Compound-style governance)**
+| Layer | Tools |
+|------|------|
+| Smart Contracts | Solidity `0.8.28`, OpenZeppelin Contracts `4.9` |
+| Development | Hardhat, ethers v6, TypeScript |
+| Testing | Hardhat + Chai |
+| Security Patterns | AccessControl, TimelockController, ERC20Votes snapshots |
 
 ---
 
-## Project Structure
+## 🗂️ Code Structure & Folder Organization
 
-```
+```text
 contracts/
- ├─ governance/
- │   ├─ GovernanceCore.sol
- │   ├─ GovernanceVotes.sol
- │   └─ GovernanceTimelock.sol
- ├─ treasury/
- │   ├─ OperationalTreasury.sol
- │   ├─ InvestmentTreasury.sol
- │   └─ ReserveTreasury.sol
- ├─ interfaces/
- └─ mocks/
+  governance/
+    GovernanceCore.sol         # Proposal lifecycle, vote tally, queue/execute
+    GovernanceVotes.sol        # ERC20Votes token + delegation + snapshots
+    GovernanceTimelock.sol     # Timelock controller wrapper
+  treasury/
+    TreasuryBase.sol           # Shared transfer logic + role gates
+    OperationalTreasury.sol    # Lower-risk operational spending
+    InvestmentTreasury.sol     # Medium-risk investment spending
+    ReserveTreasury.sol        # Long-horizon reserve treasury
+  interfaces/
+  mocks/
 
 scripts/
- └─ deploy.ts
+  deploy.ts                    # Deployment + role wiring + treasury mapping
 
 test/
- ├─ GovernanceFlow.test.ts
- └─ Lock.ts
+  GovernanceFlow.test.ts       # End-to-end governance lifecycle tests
+  Lock.ts                      # Hardhat sample test
 
 .env.example
 hardhat.config.ts
 README.md
+architecture.md
+projectdocumentation.md
 ```
 
 ---
 
-##  Governance Model
+## 🔁 Workflow Explanation
 
-### Voting Power
+### 1) Setup & bootstrap
+1. Deploy `GovernanceVotes`, `GovernanceTimelock`, `GovernanceCore`
+2. Grant timelock proposer/executor roles to `GovernanceCore`
+3. Deploy treasuries and map each proposal type to one treasury target
 
-* Based on **ERC20Votes snapshots**, transformed with **sqrt weighting**
-* Delegation is:
+### 2) Governance operation
+1. Proposer creates proposal with action payload
+2. Members vote (`for`, `against`, `abstain`) with snapshot-based non-linear weight
+3. If quorum + approval pass, proposal is queued in timelock
+4. After delay, executor triggers timelock execution into treasury
 
-  * Optional
-  * Revocable
-  * Automatically included in vote weight
-
-### Whale Protection
-
-* Proposal threshold enforced in non-linear units
-* Quorum required for validity
-* Votes weighted by `sqrt(stake)` to reduce whale dominance
+### 3) Security enforcement
+- Role-based access control on all critical actions
+- One-vote-per-address per proposal
+- One-way proposal state transition guards
+- Timelock cancellation path via guardian role
 
 ---
 
-##  Test Coverage
+## 📊 Execution Flow Diagrams
 
-All critical paths are tested:
+### A. System Architecture
 
-* Proposal creation (threshold enforced)
-* Voting (for / against / abstain)
-* Double-vote prevention
-* Quorum enforcement
-* Full lifecycle: propose → vote → queue → execute
-* Edge cases: no quorum, tie votes, expired proposals
-
-### Run Tests
-
-```bash
-npx hardhat test
+```mermaid
+graph TD
+    U[DAO Members] --> GV[GovernanceVotes<br/>ERC20Votes]
+    U --> GC[GovernanceCore]
+    GC --> GT[GovernanceTimelock]
+    GC -->|Type: Operational| OT[OperationalTreasury]
+    GC -->|Type: Experimental| IT[InvestmentTreasury]
+    GC -->|Type: HighConviction| RT[ReserveTreasury]
+    GT --> OT
+    GT --> IT
+    GT --> RT
 ```
-**All tests pass (11/11)**
+
+### B. Proposal Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Active: votingDelay elapsed
+    Active --> Defeated: quorum/approval not met
+    Active --> Succeeded: quorum + approval met
+    Succeeded --> Queued: queue() + timelock.schedule()
+    Queued --> Executed: execute() + timelock.execute()
+```
+
+### C. End-to-End Execution Sequence
+
+```mermaid
+sequenceDiagram
+    participant P as Proposer
+    participant C as GovernanceCore
+    participant V as GovernanceVotes
+    participant T as GovernanceTimelock
+    participant R as Treasury
+
+    P->>C: propose(type,target,value,data,description)
+    C->>V: getPastVotes(proposer, block-1)
+    C-->>P: proposalId
+
+    P->>C: castVote(proposalId, support)
+    C->>V: getPastVotes(voter, snapshotBlock)
+
+    P->>C: queue(proposalId)
+    C->>T: schedule(target,value,data,salt,descriptionHash,delay)
+
+    P->>C: execute(proposalId)
+    C->>T: execute(target,value,data,salt,descriptionHash)
+    T->>R: call transferETH / transferERC20
+```
+
+### D. Deployment Workflow
+
+```mermaid
+flowchart LR
+    A[Deploy GovernanceVotes] --> B[Deploy GovernanceTimelock]
+    B --> C[Deploy GovernanceCore]
+    C --> D[Grant Timelock Roles to GovernanceCore]
+    D --> E[Deploy Treasuries]
+    E --> F[Map Proposal Types to Treasury Targets]
+```
 
 ---
 
-##  Deployment 
+## ⚙️ Setup & Installation
 
-### Install Dependencies
+### Prerequisites
+
+- Node.js 18+
+- npm 9+
+
+### Install
 
 ```bash
 npm install
 ```
 
-###  Start Local Blockchain
+### Environment
 
-```bash
-npx hardhat node
-```
-
-###  Deploy & Seed DAO
-
-```bash
-npx hardhat run scripts/deploy.ts --network localhost
-```
-
-This will:
-
-* Deploy all contracts
-* Grant timelock proposer/executor roles to governance core
-
----
-
-##  Environment Variables
-
-Create `.env` from template:
-
-```bash
-cp .env.example .env
-```
-
-### `.env.example`
+Create `.env` from `.env.example` and provide network/deployer values:
 
 ```env
 RPC_URL=http://127.0.0.1:8545
-DEPLOYER_PRIVATE_KEY=0xabc123...
+DEPLOYER_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
 GOV_MIN_DELAY_SECONDS=172800
 GOV_VOTING_DELAY_BLOCKS=1
 GOV_VOTING_PERIOD_BLOCKS=45818
@@ -185,36 +184,67 @@ OPERATIONAL_MAX_ETH_TRANSFER=10
 INVESTMENT_MAX_ETH_TRANSFER=100
 ```
 
- **Never commit real private keys**
+---
+
+## 🧪 Run Locally
+
+### 1) Start local chain
+
+```bash
+npx hardhat node
+```
+
+### 2) Deploy protocol
+
+```bash
+npx hardhat run scripts/deploy.ts --network localhost
+```
+
+### 3) Run tests
+
+```bash
+npx hardhat test
+```
+
+Current status: ✅ all tests passing.
+
+### NPM command shortcuts
+
+```bash
+npm run clean
+npm run compile
+npm run node
+npm run deploy:local
+npm test
+```
 
 ---
 
-## Design Decisions
+## 🧭 Usage Instructions
 
-* **AccessControl over Ownable** → flexible DAO roles
-* **ERC20Votes** → proven snapshot governance
-* **Explicit state machine** → no implicit transitions
-* **Timelock separation** → defense-in-depth security
-* **Modular treasuries** → risk-segmented fund control
-* **Role separation** → governor (propose/vote/queue), executor (execute), guardian (cancel)
+Typical local governance run:
 
----
-
-##  Security Considerations
-
-* Snapshot-based voting prevents flash-loan attacks
-* Re-execution is impossible (executed flag)
-* Strict role-based access control on governance and treasury execution paths
-* Input validation on all external calls
-* Timelock is enforced for proposal queue/execute operations
-* Guardian role can cancel queued operations in emergency scenarios
+1. Mint governance tokens and self-delegate via `GovernanceVotes`
+2. Create proposal in `GovernanceCore` with treasury call payload
+3. Wait voting delay, then cast votes
+4. After voting period, queue proposal
+5. Wait timelock delay, execute proposal
+6. Confirm treasury balance/state changes
 
 ---
 
-##  Gas & Performance
+## 🔐 Security Posture
 
-* Optimized vote storage
-* Minimal on-chain loops
-* Suitable for DAOs with **50 → 200+ members**
+- **Access control:** `GOVERNOR_ROLE`, `EXECUTOR_ROLE`, `GUARDIAN_ROLE`
+- **Timelock enforcement:** queue/execute routed through timelock operation hash
+- **Vote integrity:** historical snapshots + one-vote-per-proposal enforcement
+- **Treasury safety:** role-gated external transfer entrypoints
 
 ---
+
+## 📚 Documentation Index
+
+- `README.md` — Product-facing overview and quickstart
+- `architecture.md` — Architecture/deep technical design
+- `projectdocumentation.md` — Full project documentation and rationale
+- `VALIDATION_CHECKLIST.md` — Requirement verification and release-readiness checks
