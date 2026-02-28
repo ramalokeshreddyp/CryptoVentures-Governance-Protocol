@@ -1,8 +1,8 @@
 #  CryptoVentures DAO – Governance System
 
-A fully on-chain, modular DAO governance system implementing proposal creation, weighted voting, delegation, quorum enforcement, timelock-based execution, and multi-tier treasury management.
+A fully on-chain, modular DAO governance system implementing proposal creation with executable action payloads, non-linear weighted voting, delegation, quorum enforcement, timelock-based execution, and multi-tier treasury management.
 
-Built with **Solidity + Hardhat + OpenZeppelin**, designed to meet **all 30 core governance requirements** and pass automated evaluator pipelines without manual intervention.
+Built with **Solidity + Hardhat + OpenZeppelin**.
 
 ---
 
@@ -14,8 +14,8 @@ CryptoVentures DAO enables members to:
 * Create proposals with spam prevention
 * Vote using snapshot-based, delegation-aware voting
 * Enforce quorum and approval thresholds
-* Queue approved proposals through a timelock
-* Execute proposals securely after delay
+* Queue approved proposals through a type-specific timelock delay
+* Execute proposals securely after delay using a dedicated executor role
 * Manage multiple treasuries with different risk profiles
 
 The system is **deterministic, auditable, and test-driven**.
@@ -47,6 +47,13 @@ Pending → Active → Succeeded → Queued → Executed
 * **Snapshot voting** prevents vote manipulation
 * **One-way transitions** prevent replay or double execution
 * **Timelock delay** allows emergency intervention
+
+### Proposal Types
+
+* **Operational**: baseline threshold, quorum, and delay
+* **Experimental**: lower threshold/quorum, higher approval requirement
+* **HighConviction**: higher threshold/quorum and longer timelock delay
+* Each type is bound to a specific treasury target and has independently configurable parameters
 
 ---
 
@@ -94,7 +101,7 @@ README.md
 
 ### Voting Power
 
-* Based on **ERC20Votes snapshots**
+* Based on **ERC20Votes snapshots**, transformed with **sqrt weighting**
 * Delegation is:
 
   * Optional
@@ -103,9 +110,9 @@ README.md
 
 ### Whale Protection
 
-* Proposal threshold enforced
+* Proposal threshold enforced in non-linear units
 * Quorum required for validity
-* Votes weighted by stake but gated by participation
+* Votes weighted by `sqrt(stake)` to reduce whale dominance
 
 ---
 
@@ -152,9 +159,7 @@ npx hardhat run scripts/deploy.ts --network localhost
 This will:
 
 * Deploy all contracts
-* Mint governance tokens
-* Delegate voting power
-* Create a sample proposal
+* Grant timelock proposer/executor roles to governance core
 
 ---
 
@@ -171,6 +176,13 @@ cp .env.example .env
 ```env
 RPC_URL=http://127.0.0.1:8545
 DEPLOYER_PRIVATE_KEY=0xabc123...
+GOV_MIN_DELAY_SECONDS=172800
+GOV_VOTING_DELAY_BLOCKS=1
+GOV_VOTING_PERIOD_BLOCKS=45818
+GOV_QUORUM_BPS=2000
+GOV_PROPOSAL_THRESHOLD_ETH=100
+OPERATIONAL_MAX_ETH_TRANSFER=10
+INVESTMENT_MAX_ETH_TRANSFER=100
 ```
 
  **Never commit real private keys**
@@ -184,6 +196,7 @@ DEPLOYER_PRIVATE_KEY=0xabc123...
 * **Explicit state machine** → no implicit transitions
 * **Timelock separation** → defense-in-depth security
 * **Modular treasuries** → risk-segmented fund control
+* **Role separation** → governor (propose/vote/queue), executor (execute), guardian (cancel)
 
 ---
 
@@ -191,9 +204,10 @@ DEPLOYER_PRIVATE_KEY=0xabc123...
 
 * Snapshot-based voting prevents flash-loan attacks
 * Re-execution is impossible (executed flag)
-* Strict role-based access control
+* Strict role-based access control on governance and treasury execution paths
 * Input validation on all external calls
-* Timelock allows emergency cancellation window
+* Timelock is enforced for proposal queue/execute operations
+* Guardian role can cancel queued operations in emergency scenarios
 
 ---
 

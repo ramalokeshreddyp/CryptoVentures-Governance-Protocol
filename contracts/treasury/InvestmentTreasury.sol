@@ -25,7 +25,10 @@ contract InvestmentTreasury is TreasuryBase {
         maxETHTransfer = _maxETHTransfer;
     }
 
-    function transferETH(address to, uint256 amount) external {
+    function transferETH(address to, uint256 amount)
+        external
+        onlyRole(EXECUTOR_ROLE)
+    {
         require(amount <= maxETHTransfer, "Investment: exceeds limit");
         _transferETH(to, amount);
     }
@@ -36,6 +39,7 @@ contract InvestmentTreasury is TreasuryBase {
         uint256 amount
     )
         external
+        onlyRole(EXECUTOR_ROLE)
     {
         _transferERC20(token, to, amount);
     }

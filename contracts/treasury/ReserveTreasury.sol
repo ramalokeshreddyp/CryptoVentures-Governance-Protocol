@@ -20,7 +20,10 @@ contract ReserveTreasury is TreasuryBase {
         TreasuryBase(timelock)
     {}
 
-    function transferETH(address to, uint256 amount) external {
+    function transferETH(address to, uint256 amount)
+        external
+        onlyRole(EXECUTOR_ROLE)
+    {
         _transferETH(to, amount);
     }
 
@@ -30,6 +33,7 @@ contract ReserveTreasury is TreasuryBase {
         uint256 amount
     )
         external
+        onlyRole(EXECUTOR_ROLE)
     {
         _transferERC20(token, to, amount);
     }
