@@ -247,4 +247,4 @@ Typical local governance run:
 - `README.md` — Product-facing overview and quickstart
 - `architecture.md` — Architecture/deep technical design
 - `projectdocumentation.md` — Full project documentation and rationale
-- `VALIDATION_CHECKLIST.md` — Requirement verification and release-readiness checks
+
