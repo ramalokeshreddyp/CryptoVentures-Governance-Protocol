@@ -1,5 +1,6 @@
 import { ethers } from "hardhat";
 import "dotenv/config";
+import { mkdir, writeFile } from "node:fs/promises";
 
 function envUint(name: string, fallback: number): bigint {
   const value = process.env[name];
@@ -18,6 +19,11 @@ function envEth(name: string, fallback: string): bigint {
 
 async function main() {
   const [deployer] = await ethers.getSigners();
+  if (!deployer) {
+    throw new Error(
+      "No deployer signer available. Start `npx hardhat node` for localhost or set DEPLOYER_PRIVATE_KEY in .env"
+    );
+  }
 
   console.log("Deploying with:", deployer.address);
 
@@ -142,6 +148,20 @@ async function main() {
   // Seed initial voting stake to demonstrate deposit-backed governance influence.
   await governance.deposit({ value: ethers.parseEther("100") });
   console.log("Seed state completed (treasury + initial stake deposit)");
+
+  const deployment = {
+    network: "localhost",
+    governance: await governance.getAddress(),
+    timelock: await timelock.getAddress(),
+    votes: await votes.getAddress(),
+    operationalTreasury: await operational.getAddress(),
+    investmentTreasury: await investment.getAddress(),
+    reserveTreasury: await reserve.getAddress(),
+  };
+
+  await mkdir("deployments", { recursive: true });
+  await writeFile("deployments/localhost.json", JSON.stringify(deployment, null, 2), "utf-8");
+  console.log("Deployment addresses saved to deployments/localhost.json");
 }
 
 main().catch((error) => {

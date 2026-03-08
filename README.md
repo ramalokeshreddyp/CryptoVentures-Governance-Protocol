@@ -202,7 +202,17 @@ npx hardhat node
 npx hardhat run scripts/deploy.ts --network localhost
 ```
 
-### 3) Run tests
+This writes contract addresses to `deployments/localhost.json`.
+
+### 3) Optional: seed additional demo state
+
+```bash
+npm run seed:local
+```
+
+`seed:local` reads addresses from `deployments/localhost.json` automatically.
+
+### 4) Run tests
 
 ```bash
 npx hardhat test

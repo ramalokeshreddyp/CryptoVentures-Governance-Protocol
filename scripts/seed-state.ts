@@ -1,5 +1,6 @@
 import { ethers } from "hardhat";
 import "dotenv/config";
+import { readFile } from "node:fs/promises";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -9,13 +10,47 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+type DeploymentFile = {
+  governance: string;
+  operationalTreasury: string;
+  investmentTreasury: string;
+  reserveTreasury: string;
+};
+
+async function tryReadDeploymentFile(): Promise<DeploymentFile | null> {
+  try {
+    const raw = await readFile("deployments/localhost.json", "utf-8");
+    const parsed = JSON.parse(raw) as DeploymentFile;
+    if (
+      parsed.governance &&
+      parsed.operationalTreasury &&
+      parsed.investmentTreasury &&
+      parsed.reserveTreasury
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const [admin, memberA, memberB, memberC, recipient] = await ethers.getSigners();
+  if (!admin) {
+    throw new Error(
+      "No signer available. Start `npx hardhat node` for localhost or set DEPLOYER_PRIVATE_KEY in .env"
+    );
+  }
 
-  const governanceAddress = requiredEnv("GOVERNANCE_ADDRESS");
-  const operationalAddress = requiredEnv("OPERATIONAL_TREASURY_ADDRESS");
-  const investmentAddress = requiredEnv("INVESTMENT_TREASURY_ADDRESS");
-  const reserveAddress = requiredEnv("RESERVE_TREASURY_ADDRESS");
+  const deployment = await tryReadDeploymentFile();
+
+  const governanceAddress = deployment?.governance ?? requiredEnv("GOVERNANCE_ADDRESS");
+  const operationalAddress =
+    deployment?.operationalTreasury ?? requiredEnv("OPERATIONAL_TREASURY_ADDRESS");
+  const investmentAddress =
+    deployment?.investmentTreasury ?? requiredEnv("INVESTMENT_TREASURY_ADDRESS");
+  const reserveAddress = deployment?.reserveTreasury ?? requiredEnv("RESERVE_TREASURY_ADDRESS");
 
   const governance = await ethers.getContractAt("GovernanceCore", governanceAddress);
 

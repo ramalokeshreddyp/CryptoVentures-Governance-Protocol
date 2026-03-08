@@ -5,8 +5,6 @@ import "dotenv/config";
 const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
 const privateKey = process.env.DEPLOYER_PRIVATE_KEY;
 
-const accounts = privateKey && privateKey.startsWith("0x") ? [privateKey] : [];
-
 const config: HardhatUserConfig = {
   solidity: {
     version: "0.8.28",
@@ -21,7 +19,7 @@ const config: HardhatUserConfig = {
     hardhat: {},
     localhost: {
       url: rpcUrl,
-      accounts,
+      ...(privateKey && privateKey.startsWith("0x") ? { accounts: [privateKey] } : {}),
     },
   },
 };
