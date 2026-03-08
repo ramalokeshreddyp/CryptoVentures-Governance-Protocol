@@ -1,191 +1,176 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 
-describe("CryptoVentures DAO – Governance Flow", function () {
+describe("CryptoVentures DAO - Governance Flow", function () {
   async function deployFixture() {
-    const [admin, voter1, voter2, recipient] = await ethers.getSigners();
+    const [admin, voter1, voter2, guardian, recipient] = await ethers.getSigners();
 
-    /* ---------------- GovernanceVotes ---------------- */
     const Votes = await ethers.getContractFactory("GovernanceVotes");
-    const votes = await Votes.deploy(
-      "CryptoVentures DAO",
-      "CVDAO",
-      admin.address
-    );
+    const votes = await Votes.deploy("CryptoVentures DAO", "CVDAO", admin.address);
     await votes.waitForDeployment();
-
-    /* ---------------- Timelock ---------------- */
-    const minDelay = 2 * 24 * 60 * 60;
 
     const Timelock = await ethers.getContractFactory("GovernanceTimelock");
     const timelock = await Timelock.deploy(
-      minDelay,
+      2 * 24 * 60 * 60,
       [admin.address],
       [admin.address],
       admin.address
     );
     await timelock.waitForDeployment();
 
-    /* ---------------- GovernanceCore ---------------- */
-    const votingDelay = 1;
-    const votingPeriod = 45818; // shortened for tests
-    const quorumBps = 2000; // 20%
-    const proposalThreshold = 10_000_000_000n;
-
     const Gov = await ethers.getContractFactory("GovernanceCore");
     const governance = await Gov.deploy(
       await votes.getAddress(),
       await timelock.getAddress(),
       admin.address,
-      votingDelay,
-      votingPeriod,
-      quorumBps,
-      proposalThreshold
+      1,
+      45818,
+      2000,
+      1n
     );
     await governance.waitForDeployment();
 
-    const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
-    const EXECUTOR_ROLE = await timelock.EXECUTOR_ROLE();
+    const tokenGovernorRole = await votes.GOVERNOR_ROLE();
+    await votes.grantRole(tokenGovernorRole, await governance.getAddress());
 
-    await timelock.grantRole(PROPOSER_ROLE, await governance.getAddress());
-    await timelock.grantRole(EXECUTOR_ROLE, await governance.getAddress());
+    const proposerRole = await timelock.PROPOSER_ROLE();
+    const timelockExecutorRole = await timelock.EXECUTOR_ROLE();
+    const cancellerRole = await timelock.CANCELLER_ROLE();
+    await timelock.grantRole(proposerRole, await governance.getAddress());
+    await timelock.grantRole(timelockExecutorRole, await governance.getAddress());
+    await timelock.grantRole(cancellerRole, await governance.getAddress());
 
-    /* ---------------- Treasury ---------------- */
     const Operational = await ethers.getContractFactory("OperationalTreasury");
-    const treasury = await Operational.deploy(
-      await timelock.getAddress(),
-      ethers.parseEther("10")
-    );
-    await treasury.waitForDeployment();
+    const operational = await Operational.deploy(await timelock.getAddress(), ethers.parseEther("10"));
+    await operational.waitForDeployment();
 
-    await governance.setProposalTypeTreasury(0, await treasury.getAddress());
-    await governance.setProposalTypeTreasury(1, await treasury.getAddress());
-    await governance.setProposalTypeTreasury(2, await treasury.getAddress());
-    /* ---------------- Grant governor role to voters ---------------- */
-    const GOVERNOR_ROLE = await governance.GOVERNOR_ROLE();
+    const Investment = await ethers.getContractFactory("InvestmentTreasury");
+    const investment = await Investment.deploy(await timelock.getAddress(), ethers.parseEther("100"));
+    await investment.waitForDeployment();
 
-    await governance.grantRole(GOVERNOR_ROLE, voter1.address);
-    await governance.grantRole(GOVERNOR_ROLE, voter2.address);
+    const Reserve = await ethers.getContractFactory("ReserveTreasury");
+    const reserve = await Reserve.deploy(await timelock.getAddress());
+    await reserve.waitForDeployment();
 
+    await governance.setProposalTypeTreasury(0, await operational.getAddress());
+    await governance.setProposalTypeTreasury(1, await investment.getAddress());
+    await governance.setProposalTypeTreasury(2, await reserve.getAddress());
 
-    /* ---------------- Mint voting power ---------------- */
-    await votes.mint(admin.address, ethers.parseEther("200"));
-    await votes.mint(voter1.address, ethers.parseEther("100"));
-    await votes.mint(voter2.address, ethers.parseEther("100"));
+    const governorRole = await governance.GOVERNOR_ROLE();
+    const guardianRole = await governance.GUARDIAN_ROLE();
+    await governance.grantRole(governorRole, voter1.address);
+    await governance.grantRole(governorRole, voter2.address);
+    await governance.grantRole(guardianRole, guardian.address);
 
-  /* ---------------- Delegate voting power ---------------- */
-  await votes.connect(admin).delegate(admin.address);
-  await votes.connect(voter1).delegate(voter1.address);
-  await votes.connect(voter2).delegate(voter2.address);
+    await admin.sendTransaction({ to: await operational.getAddress(), value: ethers.parseEther("10") });
+    await admin.sendTransaction({ to: await investment.getAddress(), value: ethers.parseEther("30") });
+    await admin.sendTransaction({ to: await reserve.getAddress(), value: ethers.parseEther("60") });
 
-  /* ---------------- Snapshot block ---------------- */
-  await ethers.provider.send("evm_mine", []);
+    await governance.connect(admin).deposit({ value: ethers.parseEther("25") });
+    await governance.connect(voter1).deposit({ value: ethers.parseEther("20") });
+    await governance.connect(voter2).deposit({ value: ethers.parseEther("15") });
+
+    await governance.connect(voter2).delegateVotingPower(voter1.address);
 
     return {
       admin,
       voter1,
       voter2,
+      guardian,
       recipient,
-      votes,
       governance,
-      timelock,
-      treasury,
+      votes,
+      operational,
     };
   }
 
-  it("runs full proposal → vote → queue → execute flow", async function () {
-    const {
-      admin,
-      voter1,
-      voter2,
-      recipient,
-      governance,
-      timelock,
-      treasury,
-    } = await deployFixture();
+  it("runs proposal -> vote -> queue -> execute lifecycle", async function () {
+    const { admin, voter1, recipient, governance, operational } = await deployFixture();
 
-    const transferAmount = ethers.parseEther("1");
-    await admin.sendTransaction({
-      to: await treasury.getAddress(),
-      value: ethers.parseEther("5"),
-    });
+    const proposalAmount = ethers.parseEther("4");
 
-    const transferCalldata = treasury.interface.encodeFunctionData("transferETH", [
-      recipient.address,
-      transferAmount,
-    ]);
-
-    /* ---------------- Propose ---------------- */
-    await governance.connect(admin).propose(
-      0,
-      await treasury.getAddress(),
-      0,
-      transferCalldata,
-      "Transfer ETH from treasury"
-    );
+    await governance.connect(admin).propose(0, recipient.address, proposalAmount, "Operational transfer");
     const proposalId = await governance.proposalCount();
 
-    /* ---------------- Move to voting ---------------- */
     await ethers.provider.send("hardhat_mine", ["0x2"]);
 
-    /* ---------------- Vote ---------------- */
     await governance.connect(admin).castVote(proposalId, 1);
     await governance.connect(voter1).castVote(proposalId, 1);
-    await governance.connect(voter2).castVote(proposalId, 0);
 
-    /* ---------------- End voting ---------------- */
     await ethers.provider.send("hardhat_mine", ["0xb300"]);
 
+    expect(await governance.state(proposalId)).to.equal(3n);
 
-    expect(await governance.state(proposalId)).to.equal(3); // Succeeded
-
-    /* ---------------- Queue ---------------- */
+    const beforeBal = await ethers.provider.getBalance(await operational.getAddress());
     await governance.queue(proposalId);
-    expect(await governance.state(proposalId)).to.equal(4); // Queued
 
-    /* ---------------- Wait timelock ---------------- */
     const config = await governance.getProposalTypeConfig(0);
     await ethers.provider.send("evm_increaseTime", [Number(config[2])]);
     await ethers.provider.send("evm_mine", []);
 
-    /* ---------------- Execute ---------------- */
-    const treasuryBalanceBefore = await ethers.provider.getBalance(
-      await treasury.getAddress()
-    );
-
     await governance.execute(proposalId);
-    expect(await governance.state(proposalId)).to.equal(5); // Executed
 
-    const treasuryBalanceAfter = await ethers.provider.getBalance(
-      await treasury.getAddress()
-    );
+    const afterBal = await ethers.provider.getBalance(await operational.getAddress());
+    expect(beforeBal - afterBal).to.equal(proposalAmount);
+    expect(await governance.state(proposalId)).to.equal(5n);
 
-    expect(treasuryBalanceBefore - treasuryBalanceAfter).to.equal(transferAmount);
+    const receipt = await governance.getReceipt(proposalId, admin.address);
+    expect(receipt.hasVoted).to.equal(true);
+    expect(receipt.support).to.equal(1n);
   });
 
-  it("prevents double voting", async function () {
-    const { admin, governance, treasury } = await deployFixture();
+  it("defeats proposals with zero participation", async function () {
+    const { admin, recipient, governance } = await deployFixture();
 
-    const noopCalldata = treasury.interface.encodeFunctionData("transferETH", [
-      admin.address,
-      1,
-    ]);
+    await governance.connect(admin).propose(0, recipient.address, ethers.parseEther("1"), "No one votes");
+    const proposalId = await governance.proposalCount();
 
-    await governance.connect(admin).propose(
-      0,
-      await treasury.getAddress(),
-      0,
-      noopCalldata,
-      "Double vote prevention"
-    );
+    await ethers.provider.send("hardhat_mine", ["0xb302"]);
+
+    expect(await governance.state(proposalId)).to.equal(2n);
+  });
+
+  it("defeats ties via approval threshold", async function () {
+    const { admin, voter1, recipient, governance } = await deployFixture();
+
+    await governance.connect(admin).propose(0, recipient.address, ethers.parseEther("1"), "Tie vote");
     const proposalId = await governance.proposalCount();
 
     await ethers.provider.send("hardhat_mine", ["0x2"]);
-
     await governance.connect(admin).castVote(proposalId, 1);
+    await governance.connect(voter1).castVote(proposalId, 0);
+
+    await ethers.provider.send("hardhat_mine", ["0xb300"]);
+    expect(await governance.state(proposalId)).to.equal(2n);
+  });
+
+  it("enforces per-tier budget limits", async function () {
+    const { admin, recipient, governance } = await deployFixture();
+
+    const availableOperational = await governance.availableTierBudget(0);
 
     await expect(
-      governance.connect(admin).castVote(proposalId, 1)
-    ).to.be.revertedWith("Gov: already voted");
+      governance
+        .connect(admin)
+        .propose(0, recipient.address, availableOperational + 1n, "Over budget")
+    ).to.be.revertedWith("Gov: exceeds tier budget");
+  });
+
+  it("allows guardian to cancel queued proposals", async function () {
+    const { admin, voter1, guardian, recipient, governance } = await deployFixture();
+
+    await governance.connect(admin).propose(0, recipient.address, ethers.parseEther("2"), "Cancelable");
+    const proposalId = await governance.proposalCount();
+
+    await ethers.provider.send("hardhat_mine", ["0x2"]);
+    await governance.connect(admin).castVote(proposalId, 1);
+    await governance.connect(voter1).castVote(proposalId, 1);
+
+    await ethers.provider.send("hardhat_mine", ["0xb300"]);
+
+    await governance.queue(proposalId);
+    await governance.connect(guardian).cancel(proposalId);
+
+    expect(await governance.state(proposalId)).to.equal(6n);
   });
 });

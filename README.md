@@ -5,7 +5,7 @@
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636?logo=solidity)
 ![Hardhat](https://img.shields.io/badge/Hardhat-Toolbox-F7DF1E?logo=ethereum)
 ![OpenZeppelin](https://img.shields.io/badge/OpenZeppelin-4.9-4E5EE4)
-![Tests](https://img.shields.io/badge/Tests-11%20Passing-success)
+![Tests](https://img.shields.io/badge/Tests-19%20Passing-success)
 
 ---
 
@@ -13,12 +13,13 @@
 
 CryptoVentures Governance Protocol enables members to create and govern treasury actions through a secure lifecycle:
 
-- Stake-backed governance participation
-- Proposal creation with executable payloads (`target`, `value`, `calldata`)
+- ETH `deposit()` mints governance stake 1:1 and self-delegates on first deposit
+- Proposal creation with recipient + amount that executes through treasury `transferETH`
 - Snapshot voting with delegation awareness
 - Non-linear vote weighting (`sqrt`) to reduce whale dominance
 - Timelock-enforced queue/execute controls
 - Segmented treasury execution by proposal type
+- Tier budget controls (60/30/10) with queued/executed accounting
 
 The goal is to provide a production-style governance foundation that is transparent, auditable, and security-focused.
 
@@ -53,6 +54,7 @@ contracts/
 
 scripts/
   deploy.ts                    # Deployment + role wiring + treasury mapping
+  seed-state.ts                # Optional local state seeding (members, deposits, votes)
 
 test/
   GovernanceFlow.test.ts       # End-to-end governance lifecycle tests
@@ -75,7 +77,7 @@ projectdocumentation.md
 3. Deploy treasuries and map each proposal type to one treasury target
 
 ### 2) Governance operation
-1. Proposer creates proposal with action payload
+1. Proposer creates proposal using `propose(type, recipient, amount, description)`
 2. Members vote (`for`, `against`, `abstain`) with snapshot-based non-linear weight
 3. If quorum + approval pass, proposal is queued in timelock
 4. After delay, executor triggers timelock execution into treasury
@@ -127,7 +129,7 @@ sequenceDiagram
     participant T as GovernanceTimelock
     participant R as Treasury
 
-    P->>C: propose(type,target,value,data,description)
+    P->>C: propose(type,recipient,amount,description)
     C->>V: getPastVotes(proposer, block-1)
     C-->>P: proposalId
 
@@ -135,10 +137,10 @@ sequenceDiagram
     C->>V: getPastVotes(voter, snapshotBlock)
 
     P->>C: queue(proposalId)
-    C->>T: schedule(target,value,data,salt,descriptionHash,delay)
+    C->>T: schedule(treasury,0,transferETH(recipient,amount),salt,descriptionHash,delay)
 
     P->>C: execute(proposalId)
-    C->>T: execute(target,value,data,salt,descriptionHash)
+    C->>T: execute(treasury,0,transferETH(recipient,amount),salt,descriptionHash)
     T->>R: call transferETH / transferERC20
 ```
 
@@ -215,7 +217,17 @@ npm run clean
 npm run compile
 npm run node
 npm run deploy:local
+npm run seed:local
 npm test
+```
+
+`seed:local` requires deployed addresses in `.env`:
+
+```env
+GOVERNANCE_ADDRESS=0x...
+OPERATIONAL_TREASURY_ADDRESS=0x...
+INVESTMENT_TREASURY_ADDRESS=0x...
+RESERVE_TREASURY_ADDRESS=0x...
 ```
 
 ---
@@ -224,12 +236,13 @@ npm test
 
 Typical local governance run:
 
-1. Mint governance tokens and self-delegate via `GovernanceVotes`
-2. Create proposal in `GovernanceCore` with treasury call payload
-3. Wait voting delay, then cast votes
-4. After voting period, queue proposal
-5. Wait timelock delay, execute proposal
-6. Confirm treasury balance/state changes
+1. Deposit ETH via `GovernanceCore.deposit()` to receive governance stake
+2. Delegate or undelegate with `delegateVotingPower()` / `undelegateVotingPower()`
+3. Create proposal with recipient + amount
+4. Wait voting delay, then cast votes
+5. After voting period, queue proposal
+6. Wait timelock delay, execute proposal
+7. Confirm treasury balance/state changes
 
 ---
 

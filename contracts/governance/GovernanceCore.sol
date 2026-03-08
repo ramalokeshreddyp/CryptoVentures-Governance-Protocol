@@ -9,50 +9,18 @@ import "./GovernanceTimelock.sol";
 /**
  * @title GovernanceCore
  * @author CryptoVentures DAO
- * @notice Core DAO governance contract responsible for proposal lifecycle management
- *
- * @dev Implements:
- * - Snapshot-based voting using ERC20Votes
- * - Proposal threshold & quorum enforcement
- * - One-way proposal state transitions
- * - Role-based access control for governance actions
- *
- * Proposal Lifecycle:
- * Pending → Active → Succeeded → Queued → Executed
- *                    ↘ Defeated
+ * @notice Core DAO governance contract for stake deposits, voting, timelock queueing, and treasury execution.
  */
 contract GovernanceCore is AccessControl {
-    /*//////////////////////////////////////////////////////////////
-                                ROLES
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Role required to create proposals, vote, and queue
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
-
-    /// @notice Role required to execute queued proposals
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
-
-    /// @notice Role required for emergency cancellation
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
-    /*//////////////////////////////////////////////////////////////
-                              CONSTANTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Minimum voting delay in blocks
     uint256 public constant MIN_VOTING_DELAY = 1;
-
-    /// @notice Minimum voting period in blocks (~1 week at 12s/block)
     uint256 public constant MIN_VOTING_PERIOD = 45818;
-
-    /// @notice Number of supported proposal types
+    uint256 public constant MAX_BPS = 10_000;
     uint8 public constant PROPOSAL_TYPE_COUNT = 3;
 
-    /*//////////////////////////////////////////////////////////////
-                                TYPES
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Possible lifecycle states of a proposal
     enum ProposalState {
         Pending,
         Active,
@@ -60,17 +28,16 @@ contract GovernanceCore is AccessControl {
         Succeeded,
         Queued,
         Executed,
+        Canceled,
         Expired
     }
 
-    /// @notice Governance proposal categories with type-specific rules
     enum ProposalType {
         Operational,
         Experimental,
         HighConviction
     }
 
-    /// @notice Governance parameters specific to a proposal type
     struct ProposalTypeConfig {
         uint256 proposalThreshold;
         uint256 quorumBps;
@@ -78,13 +45,12 @@ contract GovernanceCore is AccessControl {
         uint256 approvalBps;
     }
 
-    /// @notice Core proposal data stored on-chain
     struct Proposal {
         uint8 proposalType;
         address proposer;
-        address target;
-        uint256 value;
-        bytes data;
+        address treasury;
+        address recipient;
+        uint256 amount;
         bytes32 descriptionHash;
         bytes32 operationId;
         uint256 snapshotBlock;
@@ -93,70 +59,65 @@ contract GovernanceCore is AccessControl {
         uint256 againstVotes;
         uint256 abstainVotes;
         uint256 eta;
-        bool executed;
         bool queued;
+        bool executed;
         bool canceled;
+        bool reservationCleared;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                              STORAGE
-    //////////////////////////////////////////////////////////////*/
+    struct Receipt {
+        bool hasVoted;
+        uint8 support;
+        uint256 votes;
+    }
 
-    /// @notice ERC20Votes-compatible governance token
     GovernanceVotes public immutable votesToken;
-
-    /// @notice Timelock controller responsible for delayed execution
     GovernanceTimelock public immutable timelock;
 
-    /// @notice Total number of proposals created
     uint256 public proposalCount;
-
-    /// @notice Delay (in blocks) before voting becomes active
     uint256 public votingDelay;
-
-    /// @notice Duration (in blocks) of the voting period
     uint256 public votingPeriod;
+    uint256 public executionGracePeriod;
 
-    /// @notice Mapping of proposal ID to proposal data
+    uint256 public totalDepositedETH;
+
     mapping(uint256 => Proposal) private proposals;
+    mapping(uint256 => mapping(address => Receipt)) private receipts;
 
-    /// @notice Per-proposal-type governance settings
     mapping(uint8 => ProposalTypeConfig) private proposalTypeConfigs;
-
-    /// @notice Treasury target per proposal category
     mapping(uint8 => address) public proposalTypeTreasury;
 
-    /// @notice Tracks total executed ETH-value by proposal type
+    mapping(uint8 => uint16) public allocationBpsByType;
+    mapping(uint8 => uint256) public queuedValueByType;
     mapping(uint8 => uint256) public executedValueByType;
 
-    /// @notice Tracks whether an address has voted on a proposal
-    mapping(uint256 => mapping(address => bool)) public hasVoted;
+    mapping(address => uint256) public depositedByMember;
 
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
+    event Deposited(address indexed member, uint256 amount, uint256 mintedVotes);
+    event DelegationChanged(address indexed delegator, address indexed fromDelegate, address indexed toDelegate);
 
-    /// @notice Emitted when a proposal is created
-    event ProposalCreated(uint256 indexed proposalId);
-
-    /// @notice Emitted when a vote is cast
-    event VoteCast(
-        address indexed voter,
+    event ProposalCreated(
         uint256 indexed proposalId,
+        address indexed proposer,
+        uint8 indexed proposalType,
+        address treasury,
+        address recipient,
+        uint256 amount,
+        string description
+    );
+
+    event VoteCast(
+        uint256 indexed proposalId,
+        address indexed voter,
         uint8 support,
         uint256 weight
     );
 
-    /// @notice Emitted when a proposal is queued
     event ProposalQueued(uint256 indexed proposalId, uint256 eta);
-
-    /// @notice Emitted when a proposal is executed
-    event ProposalExecuted(uint256 indexed proposalId);
-
-    /// @notice Emitted when a queued proposal is canceled by guardian
+    event ProposalExecuted(uint256 indexed proposalId, address indexed recipient, uint256 amount);
     event ProposalCanceled(uint256 indexed proposalId);
+    event ProposalReservationReleased(uint256 indexed proposalId);
 
-    /// @notice Emitted when proposal-type governance parameters are updated
     event ProposalTypeConfigUpdated(
         uint8 indexed proposalType,
         uint256 proposalThreshold,
@@ -165,23 +126,9 @@ contract GovernanceCore is AccessControl {
         uint256 approvalBps
     );
 
-    /// @notice Emitted when proposal-type treasury target is updated
     event ProposalTypeTreasuryUpdated(uint8 indexed proposalType, address indexed treasury);
+    event AllocationBpsUpdated(uint8 indexed proposalType, uint16 allocationBps);
 
-    /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Initializes the governance system
-     * @param _votesToken Address of the governance ERC20Votes token
-    * @param _timelock Address of the governance timelock
-     * @param admin Address granted admin & governor roles
-     * @param _votingDelay Delay before voting starts (blocks)
-     * @param _votingPeriod Duration of voting (blocks)
-    * @param _quorumBps Base quorum threshold in basis points
-    * @param _proposalThreshold Base minimum votes required to propose
-     */
     constructor(
         GovernanceVotes _votesToken,
         GovernanceTimelock _timelock,
@@ -196,13 +143,14 @@ contract GovernanceCore is AccessControl {
         require(admin != address(0), "Gov: admin zero");
         require(_votingDelay >= MIN_VOTING_DELAY, "Gov: voting delay too short");
         require(_votingPeriod >= MIN_VOTING_PERIOD, "Gov: voting period too short");
-        require(_quorumBps <= 10_000, "Gov: quorum > 100%");
+        require(_quorumBps <= MAX_BPS, "Gov: quorum > 100%");
         require(_proposalThreshold > 0, "Gov: threshold zero");
 
         votesToken = _votesToken;
         timelock = _timelock;
         votingDelay = _votingDelay;
         votingPeriod = _votingPeriod;
+        executionGracePeriod = 7 days;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNOR_ROLE, admin);
@@ -210,128 +158,141 @@ contract GovernanceCore is AccessControl {
         _grantRole(GUARDIAN_ROLE, admin);
 
         uint256 minDelay = _timelock.getMinDelay();
-        uint256 experimentalThreshold = _proposalThreshold / 2;
-        if (experimentalThreshold == 0) experimentalThreshold = 1;
-
-        uint256 experimentalQuorum = _quorumBps / 2;
-        if (experimentalQuorum == 0) experimentalQuorum = 1;
-
-        uint256 highConvictionQuorum = _quorumBps * 2;
-        if (highConvictionQuorum > 10_000) highConvictionQuorum = 10_000;
+        uint256 operationalDelay = minDelay > 1 days ? minDelay : 1 days;
+        uint256 experimentalDelay = minDelay > 3 days ? minDelay : 3 days;
+        uint256 highConvictionDelay = minDelay > 7 days ? minDelay : 7 days;
 
         _setProposalTypeConfig(
             uint8(ProposalType.Operational),
             _proposalThreshold,
-            _quorumBps,
-            minDelay,
-            5001
+            1500,
+            operationalDelay,
+            5000
         );
         _setProposalTypeConfig(
             uint8(ProposalType.Experimental),
-            experimentalThreshold,
-            experimentalQuorum,
-            minDelay,
-            5500
+            _proposalThreshold,
+            2500,
+            experimentalDelay,
+            5000
         );
         _setProposalTypeConfig(
             uint8(ProposalType.HighConviction),
-            _proposalThreshold * 2,
-            highConvictionQuorum,
-            minDelay * 3,
+            _proposalThreshold,
+            4000,
+            highConvictionDelay,
             6000
         );
+
+        allocationBpsByType[uint8(ProposalType.HighConviction)] = 6000;
+        allocationBpsByType[uint8(ProposalType.Experimental)] = 3000;
+        allocationBpsByType[uint8(ProposalType.Operational)] = 1000;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                        PROPOSAL CREATION
-    //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Deposits ETH into governance and mints 1:1 governance stake units.
+     * @dev Minted tokens are self-delegated for immediate governance participation.
+     */
+    function deposit() external payable onlyRole(GOVERNOR_ROLE) {
+        require(msg.value > 0, "Gov: zero deposit");
+
+        depositedByMember[msg.sender] += msg.value;
+        totalDepositedETH += msg.value;
+
+        votesToken.mint(msg.sender, msg.value);
+
+        if (votesToken.delegates(msg.sender) == address(0)) {
+            votesToken.delegateFor(msg.sender, msg.sender);
+            emit DelegationChanged(msg.sender, address(0), msg.sender);
+        }
+
+        emit Deposited(msg.sender, msg.value, msg.value);
+    }
 
     /**
-     * @notice Creates a new governance proposal
-     * @dev Caller must meet proposal threshold based on snapshot voting power
-     * @param target Target contract to call on execution
-     * @param value ETH value to send with execution
-     * @param data Calldata to send to the target
-     * @param description Human-readable proposal description
-     * @return proposalId Unique identifier of the created proposal
+     * @notice Delegates voting power to a trusted member.
+     * @param delegatee Address receiving delegated power.
+     */
+    function delegateVotingPower(address delegatee) external onlyRole(GOVERNOR_ROLE) {
+        require(delegatee != address(0), "Gov: delegate zero");
+
+        address fromDelegate = votesToken.delegates(msg.sender);
+        votesToken.delegateFor(msg.sender, delegatee);
+
+        emit DelegationChanged(msg.sender, fromDelegate, delegatee);
+    }
+
+    /**
+     * @notice Revokes external delegation by self-delegating.
+     */
+    function undelegateVotingPower() external onlyRole(GOVERNOR_ROLE) {
+        address fromDelegate = votesToken.delegates(msg.sender);
+        votesToken.delegateFor(msg.sender, msg.sender);
+        emit DelegationChanged(msg.sender, fromDelegate, msg.sender);
+    }
+
+    /**
+     * @notice Creates an ETH transfer proposal against the treasury bound to a proposal type.
      */
     function propose(
         uint8 proposalType,
-        address target,
-        uint256 value,
-        bytes calldata data,
+        address recipient,
+        uint256 amount,
         string calldata description
-    )
-        external
-        onlyRole(GOVERNOR_ROLE)
-        returns (uint256 proposalId)
-    {
+    ) external onlyRole(GOVERNOR_ROLE) returns (uint256 proposalId) {
         require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
-        require(target != address(0), "Gov: target zero");
-        require(
-            proposalTypeTreasury[proposalType] == target,
-            "Gov: invalid treasury for type"
-        );
+        require(recipient != address(0), "Gov: recipient zero");
+        require(amount > 0, "Gov: amount zero");
+
+        address treasury = proposalTypeTreasury[proposalType];
+        require(treasury != address(0), "Gov: treasury not set");
+        require(amount <= availableTierBudget(proposalType), "Gov: exceeds tier budget");
 
         ProposalTypeConfig storage config = proposalTypeConfigs[proposalType];
 
-        uint256 proposerVotes = _nonLinearVotes(
-            votesToken.getPastVotes(msg.sender, block.number - 1)
-        );
+        uint256 proposerVotes = _nonLinearVotes(votesToken.getPastVotes(msg.sender, block.number - 1));
+        require(proposerVotes >= config.proposalThreshold, "Gov: proposer votes below threshold");
 
-        require(
-            proposerVotes >= config.proposalThreshold,
-            "Gov: proposer votes below threshold"
-        );
-
-        uint256 snapshot = block.number + votingDelay;
-        uint256 deadline = snapshot + votingPeriod;
-        bytes32 descriptionHash = keccak256(bytes(description));
-
-        proposalCount++;
-        Proposal storage proposal = proposals[proposalCount];
-        proposal.proposalType = proposalType;
-        proposal.proposer = msg.sender;
-        proposal.target = target;
-        proposal.value = value;
-        proposal.data = data;
-        proposal.descriptionHash = descriptionHash;
-        proposal.snapshotBlock = snapshot;
-        proposal.deadlineBlock = deadline;
-
-        emit ProposalCreated(proposalCount);
-
-        return proposalCount;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                                VOTING
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Casts a vote on an active proposal
-     * @param proposalId ID of the proposal
-     * @param support Vote choice (0 = Against, 1 = For, 2 = Abstain)
-    * @dev Voting power is determined via ERC20Votes snapshot and transformed non-linearly
-     */
-    function castVote(uint256 proposalId, uint8 support)
-        external
-        onlyRole(GOVERNOR_ROLE)
-    {
-        require(support <= 2, "Gov: invalid support");
+        proposalId = ++proposalCount;
 
         Proposal storage proposal = proposals[proposalId];
+        proposal.proposalType = proposalType;
+        proposal.proposer = msg.sender;
+        proposal.treasury = treasury;
+        proposal.recipient = recipient;
+        proposal.amount = amount;
+        proposal.descriptionHash = keccak256(bytes(description));
+        proposal.snapshotBlock = block.number + votingDelay;
+        proposal.deadlineBlock = proposal.snapshotBlock + votingPeriod;
 
-        require(state(proposalId) == ProposalState.Active, "Gov: voting closed");
-        require(!hasVoted[proposalId][msg.sender], "Gov: already voted");
-
-        uint256 weight = _nonLinearVotes(
-            votesToken.getPastVotes(msg.sender, proposal.snapshotBlock)
+        emit ProposalCreated(
+            proposalId,
+            msg.sender,
+            proposalType,
+            treasury,
+            recipient,
+            amount,
+            description
         );
+    }
 
+    /**
+     * @notice Casts one immutable vote per proposal.
+     */
+    function castVote(uint256 proposalId, uint8 support) external onlyRole(GOVERNOR_ROLE) {
+        require(support <= 2, "Gov: invalid support");
+        require(state(proposalId) == ProposalState.Active, "Gov: voting closed");
+
+        Receipt storage receipt = receipts[proposalId][msg.sender];
+        require(!receipt.hasVoted, "Gov: already voted");
+
+        Proposal storage proposal = proposals[proposalId];
+        uint256 weight = _nonLinearVotes(votesToken.getPastVotes(msg.sender, proposal.snapshotBlock));
         require(weight > 0, "Gov: no voting power");
 
-        hasVoted[proposalId][msg.sender] = true;
+        receipt.hasVoted = true;
+        receipt.support = support;
+        receipt.votes = weight;
 
         if (support == 0) {
             proposal.againstVotes += weight;
@@ -341,170 +302,173 @@ contract GovernanceCore is AccessControl {
             proposal.abstainVotes += weight;
         }
 
-        emit VoteCast(msg.sender, proposalId, support, weight);
+        emit VoteCast(proposalId, msg.sender, support, weight);
     }
 
     /**
-     * @notice Returns current non-linear voting power for an account
-     * @param account Address to query
+     * @notice Returns current non-linear voting power.
      */
-    function currentVotingPower(address account)
-        external
-        view
-        returns (uint256)
-    {
+    function currentVotingPower(address account) external view returns (uint256) {
         return _nonLinearVotes(votesToken.getVotes(account));
     }
 
     /**
-     * @notice Returns snapshot non-linear voting power for an account
-     * @param account Address to query
-     * @param blockNumber Snapshot block number
+     * @notice Returns snapshot non-linear voting power.
      */
-    function pastVotingPower(address account, uint256 blockNumber)
-        external
-        view
-        returns (uint256)
-    {
+    function pastVotingPower(address account, uint256 blockNumber) external view returns (uint256) {
         return _nonLinearVotes(votesToken.getPastVotes(account, blockNumber));
     }
 
-    /*//////////////////////////////////////////////////////////////
-                          PROPOSAL STATE
-    //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Returns a proposal's vote receipt for a specific voter.
+     */
+    function getReceipt(uint256 proposalId, address voter) external view returns (Receipt memory) {
+        return receipts[proposalId][voter];
+    }
 
     /**
-     * @notice Returns the current state of a proposal
-     * @param proposalId ID of the proposal
+     * @notice Returns full proposal details.
      */
-    function state(uint256 proposalId)
-        public
-        view
-        returns (ProposalState)
-    {
+    function getProposal(uint256 proposalId) external view returns (Proposal memory) {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.snapshotBlock != 0, "Gov: invalid proposal");
+        return proposal;
+    }
+
+    /**
+     * @notice Returns true if proposal reached quorum and approval thresholds.
+     */
+    function hasSucceeded(uint256 proposalId) public view returns (bool) {
         Proposal storage proposal = proposals[proposalId];
         require(proposal.snapshotBlock != 0, "Gov: invalid proposal");
 
-        if (proposal.executed) return ProposalState.Executed;
-        if (proposal.queued) return ProposalState.Queued;
-        if (block.number < proposal.snapshotBlock) return ProposalState.Pending;
-        if (block.number <= proposal.deadlineBlock) return ProposalState.Active;
-
-        uint256 totalSupplyAtSnapshot =
-            votesToken.getPastTotalSupply(proposal.snapshotBlock);
-
+        uint256 totalSupplyAtSnapshot = votesToken.getPastTotalSupply(proposal.snapshotBlock);
         ProposalTypeConfig storage config = proposalTypeConfigs[proposal.proposalType];
 
-        uint256 quorumVotes = Math.mulDiv(
-            _nonLinearVotes(totalSupplyAtSnapshot),
-            config.quorumBps,
-            10_000
-        );
-
-        uint256 totalParticipating =
-            proposal.forVotes +
-            proposal.againstVotes +
-            proposal.abstainVotes;
+        uint256 quorumVotes = Math.mulDiv(_nonLinearVotes(totalSupplyAtSnapshot), config.quorumBps, MAX_BPS);
+        uint256 totalParticipating = proposal.forVotes + proposal.againstVotes + proposal.abstainVotes;
 
         if (totalParticipating < quorumVotes) {
-            return ProposalState.Defeated;
+            return false;
         }
 
         uint256 sentimentVotes = proposal.forVotes + proposal.againstVotes;
         if (sentimentVotes == 0) {
-            return ProposalState.Defeated;
+            return false;
         }
 
-        uint256 approvalBps = Math.mulDiv(proposal.forVotes, 10_000, sentimentVotes);
-        if (approvalBps < config.approvalBps) {
+        uint256 approvalBps = Math.mulDiv(proposal.forVotes, MAX_BPS, sentimentVotes);
+        return approvalBps >= config.approvalBps;
+    }
+
+    /**
+     * @notice Returns current state for a proposal ID.
+     */
+    function state(uint256 proposalId) public view returns (ProposalState) {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.snapshotBlock != 0, "Gov: invalid proposal");
+
+        if (proposal.executed) return ProposalState.Executed;
+        if (proposal.canceled) return ProposalState.Canceled;
+
+        if (proposal.queued) {
+            if (block.timestamp > proposal.eta + executionGracePeriod) {
+                return ProposalState.Expired;
+            }
+            return ProposalState.Queued;
+        }
+
+        if (block.number < proposal.snapshotBlock) return ProposalState.Pending;
+        if (block.number <= proposal.deadlineBlock) return ProposalState.Active;
+
+        if (!hasSucceeded(proposalId)) {
             return ProposalState.Defeated;
         }
 
         return ProposalState.Succeeded;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                      QUEUE & EXECUTION
-    //////////////////////////////////////////////////////////////*/
-
     /**
-     * @notice Queues a succeeded proposal for execution
-     * @param proposalId ID of the proposal
+     * @notice Queues a succeeded proposal in the timelock.
      */
-    function queue(uint256 proposalId)
-        external
-        onlyRole(GOVERNOR_ROLE)
-    {
+    function queue(uint256 proposalId) external onlyRole(GOVERNOR_ROLE) {
         Proposal storage proposal = proposals[proposalId];
 
-        require(
-            state(proposalId) == ProposalState.Succeeded,
-            "Gov: proposal not succeeded"
-        );
-        require(!proposal.queued, "Gov: already queued");
+        require(state(proposalId) == ProposalState.Succeeded, "Gov: proposal not succeeded");
+        require(address(proposal.treasury).balance >= proposal.amount, "Gov: treasury insufficient ETH");
+
         ProposalTypeConfig storage config = proposalTypeConfigs[proposal.proposalType];
-        uint256 delay = config.timelockDelay;
+
+        bytes memory callData = abi.encodeWithSignature(
+            "transferETH(address,uint256)",
+            proposal.recipient,
+            proposal.amount
+        );
 
         bytes32 operationId = timelock.hashOperation(
-            proposal.target,
-            proposal.value,
-            proposal.data,
+            proposal.treasury,
+            0,
+            callData,
             bytes32(0),
             proposal.descriptionHash
         );
 
         timelock.schedule(
-            proposal.target,
-            proposal.value,
-            proposal.data,
+            proposal.treasury,
+            0,
+            callData,
             bytes32(0),
             proposal.descriptionHash,
-            delay
+            config.timelockDelay
         );
 
         proposal.operationId = operationId;
         proposal.queued = true;
-        proposal.eta = block.timestamp + delay;
+        proposal.eta = block.timestamp + config.timelockDelay;
+
+        queuedValueByType[proposal.proposalType] += proposal.amount;
+
         emit ProposalQueued(proposalId, proposal.eta);
     }
 
     /**
-     * @notice Marks a queued proposal as executed
-     * @param proposalId ID of the proposal
+     * @notice Executes a queued proposal after timelock delay and before grace expiry.
      */
-    function execute(uint256 proposalId)
-        external
-        onlyRole(EXECUTOR_ROLE)
-    {
+    function execute(uint256 proposalId) external onlyRole(EXECUTOR_ROLE) {
         Proposal storage proposal = proposals[proposalId];
 
-        require(
-            state(proposalId) == ProposalState.Queued,
-            "Gov: proposal not queued"
+        require(state(proposalId) == ProposalState.Queued, "Gov: proposal not executable");
+
+        bytes memory callData = abi.encodeWithSignature(
+            "transferETH(address,uint256)",
+            proposal.recipient,
+            proposal.amount
         );
-        require(!proposal.canceled, "Gov: canceled proposal");
 
         timelock.execute(
-            proposal.target,
-            proposal.value,
-            proposal.data,
+            proposal.treasury,
+            0,
+            callData,
             bytes32(0),
             proposal.descriptionHash
         );
 
         proposal.executed = true;
-        executedValueByType[proposal.proposalType] += proposal.value;
-        emit ProposalExecuted(proposalId);
+        proposal.queued = false;
+
+        if (!proposal.reservationCleared) {
+            proposal.reservationCleared = true;
+            queuedValueByType[proposal.proposalType] -= proposal.amount;
+            executedValueByType[proposal.proposalType] += proposal.amount;
+        }
+
+        emit ProposalExecuted(proposalId, proposal.recipient, proposal.amount);
     }
 
     /**
-     * @notice Cancels a queued proposal in emergencies
-     * @param proposalId ID of the proposal
+     * @notice Cancels a queued proposal in emergency conditions.
      */
-    function cancel(uint256 proposalId)
-        external
-        onlyRole(GUARDIAN_ROLE)
-    {
+    function cancel(uint256 proposalId) external onlyRole(GUARDIAN_ROLE) {
         Proposal storage proposal = proposals[proposalId];
 
         require(proposal.snapshotBlock != 0, "Gov: invalid proposal");
@@ -517,11 +481,32 @@ contract GovernanceCore is AccessControl {
         proposal.canceled = true;
         proposal.queued = false;
 
+        if (!proposal.reservationCleared) {
+            proposal.reservationCleared = true;
+            queuedValueByType[proposal.proposalType] -= proposal.amount;
+        }
+
         emit ProposalCanceled(proposalId);
     }
 
     /**
-     * @notice Returns governance config for a proposal type
+     * @notice Releases reserved budget from an expired proposal.
+     */
+    function releaseExpiredReservation(uint256 proposalId) external {
+        Proposal storage proposal = proposals[proposalId];
+
+        require(state(proposalId) == ProposalState.Expired, "Gov: proposal not expired");
+        require(!proposal.reservationCleared, "Gov: reservation cleared");
+
+        proposal.reservationCleared = true;
+        proposal.queued = false;
+        queuedValueByType[proposal.proposalType] -= proposal.amount;
+
+        emit ProposalReservationReleased(proposalId);
+    }
+
+    /**
+     * @notice Returns governance config for a proposal type.
      */
     function getProposalTypeConfig(uint8 proposalType)
         external
@@ -535,16 +520,11 @@ contract GovernanceCore is AccessControl {
     {
         require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
         ProposalTypeConfig storage config = proposalTypeConfigs[proposalType];
-        return (
-            config.proposalThreshold,
-            config.quorumBps,
-            config.timelockDelay,
-            config.approvalBps
-        );
+        return (config.proposalThreshold, config.quorumBps, config.timelockDelay, config.approvalBps);
     }
 
     /**
-     * @notice Sets governance config for a proposal type
+     * @notice Updates governance config for a proposal type.
      */
     function setProposalTypeConfig(
         uint8 proposalType,
@@ -552,10 +532,7 @@ contract GovernanceCore is AccessControl {
         uint256 typeQuorumBps,
         uint256 typeTimelockDelay,
         uint256 typeApprovalBps
-    )
-        external
-        onlyRole(DEFAULT_ADMIN_ROLE)
-    {
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setProposalTypeConfig(
             proposalType,
             typeProposalThreshold,
@@ -566,17 +543,62 @@ contract GovernanceCore is AccessControl {
     }
 
     /**
-     * @notice Sets allowed treasury target for a proposal type
+     * @notice Binds treasury address to a proposal type.
      */
-    function setProposalTypeTreasury(uint8 proposalType, address treasury)
-        external
-        onlyRole(DEFAULT_ADMIN_ROLE)
-    {
+    function setProposalTypeTreasury(uint8 proposalType, address treasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
         require(treasury != address(0), "Gov: treasury zero");
 
         proposalTypeTreasury[proposalType] = treasury;
         emit ProposalTypeTreasuryUpdated(proposalType, treasury);
+    }
+
+    /**
+     * @notice Updates allocation basis points per proposal type.
+     */
+    function setAllocationBps(uint8 proposalType, uint16 allocationBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
+        require(allocationBps <= MAX_BPS, "Gov: allocation > 100%");
+
+        uint256 newTotal =
+            allocationBpsByType[0] +
+            allocationBpsByType[1] +
+            allocationBpsByType[2] -
+            allocationBpsByType[proposalType] +
+            allocationBps;
+
+        require(newTotal == MAX_BPS, "Gov: allocation sum != 100%");
+
+        allocationBpsByType[proposalType] = allocationBps;
+        emit AllocationBpsUpdated(proposalType, allocationBps);
+    }
+
+    /**
+     * @notice Updates the grace window for queued proposal execution.
+     */
+    function setExecutionGracePeriod(uint256 newGracePeriod) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newGracePeriod > 0, "Gov: grace zero");
+        executionGracePeriod = newGracePeriod;
+    }
+
+    /**
+     * @notice Returns total budget assigned to a proposal tier.
+     */
+    function tierBudget(uint8 proposalType) public view returns (uint256) {
+        require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
+        return Math.mulDiv(totalDepositedETH, allocationBpsByType[proposalType], MAX_BPS);
+    }
+
+    /**
+     * @notice Returns available budget for new proposals in a proposal tier.
+     */
+    function availableTierBudget(uint8 proposalType) public view returns (uint256) {
+        uint256 budget = tierBudget(proposalType);
+        uint256 consumed = queuedValueByType[proposalType] + executedValueByType[proposalType];
+        if (consumed >= budget) {
+            return 0;
+        }
+        return budget - consumed;
     }
 
     function _setProposalTypeConfig(
@@ -585,14 +607,12 @@ contract GovernanceCore is AccessControl {
         uint256 typeQuorumBps,
         uint256 typeTimelockDelay,
         uint256 typeApprovalBps
-    )
-        internal
-    {
+    ) internal {
         require(_isValidProposalType(proposalType), "Gov: invalid proposal type");
         require(typeProposalThreshold > 0, "Gov: threshold zero");
-        require(typeQuorumBps <= 10_000, "Gov: quorum > 100%");
+        require(typeQuorumBps <= MAX_BPS, "Gov: quorum > 100%");
         require(typeTimelockDelay >= timelock.getMinDelay(), "Gov: delay below min");
-        require(typeApprovalBps > 0 && typeApprovalBps <= 10_000, "Gov: invalid approval");
+        require(typeApprovalBps > 0 && typeApprovalBps <= MAX_BPS, "Gov: invalid approval");
 
         proposalTypeConfigs[proposalType] = ProposalTypeConfig({
             proposalThreshold: typeProposalThreshold,
@@ -610,19 +630,11 @@ contract GovernanceCore is AccessControl {
         );
     }
 
-    function _isValidProposalType(uint8 proposalType)
-        internal
-        pure
-        returns (bool)
-    {
+    function _isValidProposalType(uint8 proposalType) internal pure returns (bool) {
         return proposalType < PROPOSAL_TYPE_COUNT;
     }
 
-    function _nonLinearVotes(uint256 linearVotes)
-        internal
-        pure
-        returns (uint256)
-    {
+    function _nonLinearVotes(uint256 linearVotes) internal pure returns (uint256) {
         return Math.sqrt(linearVotes);
     }
 }

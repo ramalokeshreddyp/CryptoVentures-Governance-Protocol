@@ -9,18 +9,22 @@ pragma solidity ^0.8.28;
  * @dev Used by treasury contracts to interact with GovernanceCore
  */
 interface IGovernance {
+    function deposit() external payable;
+
+    function delegateVotingPower(address delegatee) external;
+
+    function undelegateVotingPower() external;
+
     /**
-     * @notice Creates a proposal with executable action details
-     * @param target Address to call during execution
-     * @param value ETH value to send
-     * @param data Calldata payload
+     * @notice Creates an ETH transfer proposal by proposal type
+     * @param recipient Recipient of treasury funds
+     * @param amount Amount of ETH to transfer
      * @param description Human-readable proposal description
      */
     function propose(
         uint8 proposalType,
-        address target,
-        uint256 value,
-        bytes calldata data,
+        address recipient,
+        uint256 amount,
         string calldata description
     ) external returns (uint256);
 
@@ -41,4 +45,6 @@ interface IGovernance {
      * @param proposalId The proposal identifier
      */
     function execute(uint256 proposalId) external;
+
+    function currentVotingPower(address account) external view returns (uint256);
 }

@@ -75,11 +75,17 @@ async function main() {
 
   console.log("GovernanceCore:", await governance.getAddress());
 
+  const TOKEN_GOVERNOR_ROLE = await votes.GOVERNOR_ROLE();
+  await votes.grantRole(TOKEN_GOVERNOR_ROLE, await governance.getAddress());
+  console.log("GovernanceVotes governor role granted to GovernanceCore");
+
   const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
   const EXECUTOR_ROLE = await timelock.EXECUTOR_ROLE();
+  const CANCELLER_ROLE = await timelock.CANCELLER_ROLE();
 
   await timelock.grantRole(PROPOSER_ROLE, await governance.getAddress());
   await timelock.grantRole(EXECUTOR_ROLE, await governance.getAddress());
+  await timelock.grantRole(CANCELLER_ROLE, await governance.getAddress());
 
   console.log("Timelock roles granted to GovernanceCore");
 
@@ -118,6 +124,24 @@ async function main() {
   await governance.setProposalTypeTreasury(2, await reserve.getAddress());
 
   console.log("Proposal-type treasury mapping configured");
+
+  // Seed a 1000 ETH baseline split across treasury tiers (10/30/60).
+  await deployer.sendTransaction({
+    to: await operational.getAddress(),
+    value: ethers.parseEther("100"),
+  });
+  await deployer.sendTransaction({
+    to: await investment.getAddress(),
+    value: ethers.parseEther("300"),
+  });
+  await deployer.sendTransaction({
+    to: await reserve.getAddress(),
+    value: ethers.parseEther("600"),
+  });
+
+  // Seed initial voting stake to demonstrate deposit-backed governance influence.
+  await governance.deposit({ value: ethers.parseEther("100") });
+  console.log("Seed state completed (treasury + initial stake deposit)");
 }
 
 main().catch((error) => {

@@ -52,6 +52,7 @@ contract GovernanceVotes is
         ERC20Permit(name_)
     {
         require(governor != address(0), "Votes: governor zero address");
+        _grantRole(DEFAULT_ADMIN_ROLE, governor);
         _grantRole(GOVERNOR_ROLE, governor);
     }
 
@@ -83,6 +84,19 @@ contract GovernanceVotes is
         onlyRole(GOVERNOR_ROLE)
     {
         _burn(from, amount);
+    }
+
+    /**
+     * @notice Delegates voting power on behalf of an account.
+     * @param account Account whose voting power is delegated
+     * @param delegatee Address receiving the delegation
+     * @dev Restricted to GOVERNOR_ROLE so GovernanceCore can orchestrate stake UX.
+     */
+    function delegateFor(address account, address delegatee)
+        external
+        onlyRole(GOVERNOR_ROLE)
+    {
+        _delegate(account, delegatee);
     }
 
     /*//////////////////////////////////////////////////////////////
