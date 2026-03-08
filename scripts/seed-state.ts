@@ -70,6 +70,22 @@ async function main() {
 
   await governance.connect(memberC).delegateVotingPower(memberB.address);
 
+  // Local seeding resilience: if configured threshold is above current admin power,
+  // lower only the operational threshold so sample proposal creation can proceed.
+  const adminPower = await governance.currentVotingPower(admin.address);
+  const operationalConfig = await governance.getProposalTypeConfig(0);
+  const configuredThreshold = operationalConfig[0] as bigint;
+  if (configuredThreshold > adminPower) {
+    const loweredThreshold = adminPower > 1n ? adminPower - 1n : 1n;
+    await governance.setProposalTypeConfig(
+      0,
+      loweredThreshold,
+      operationalConfig[1],
+      operationalConfig[2],
+      operationalConfig[3]
+    );
+  }
+
   await governance.connect(admin).propose(
     0,
     recipient.address,
